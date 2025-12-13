@@ -4,6 +4,21 @@
 #include "class/hid/hid.h"
 #include "class/hid/hid_host.h"
 
+// PS3 default output report for LED configuration
+// Based on PS3 controller specification, this sets up the controller with default LED/rumble settings
+static const uint8_t PS3_DEFAULT_OUT_REPORT[PS3_OUT_REPORT_SIZE] = {
+    0x01, 0xff, 0x00, 0xff, 0x00,  // Report ID and rumble settings
+    0x00, 0x00, 0x00, 0x00, 0x00,  // Rumble duration and LED bitmap (to be modified)
+    0xff, 0x27, 0x10, 0x00, 0x32,  // LED 1: duration 0xff, period 0x27, on-time 0x10, off-time 0x00, brightness 0x32
+    0xff, 0x27, 0x10, 0x00, 0x32,  // LED 2: same settings
+    0xff, 0x27, 0x10, 0x00, 0x32,  // LED 3: same settings
+    0xff, 0x27, 0x10, 0x00, 0x32,  // LED 4: same settings
+    0x00, 0x00, 0x00, 0x00, 0x00,  // Reserved
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00
+};
+
 void GamepadUSBHostListener::setup() {
     _controller_host_enabled = false;
 #if GAMEPAD_HOST_DEBUG
@@ -461,40 +476,30 @@ void GamepadUSBHostListener::init_ps3() {
     
     // Start PS3 initialization sequence by requesting pairing info (0xF2)
     memset(ps3_report_buffer, 0, sizeof(ps3_report_buffer));
-    host_get_report(PS3_GET_PAIRING_INFO, ps3_report_buffer, 17);
+    host_get_report(PS3_GET_PAIRING_INFO, ps3_report_buffer, PS3_INIT_REPORT_LEN_STAGE1);
 }
 
 void GamepadUSBHostListener::setup_ps3() {
     ps3InitStage++;
     
-    if (ps3InitStage < 3) {
+    if (ps3InitStage < PS3_INIT_STAGE_COUNT) {
         // Perform multiple GET_REPORT requests as part of initialization handshake
-        uint16_t report_len = (ps3InitStage == 2) ? 8 : 17;
+        uint16_t report_len = (ps3InitStage == 2) ? PS3_INIT_REPORT_LEN_STAGE3 : PS3_INIT_REPORT_LEN_STAGE2;
         memset(ps3_report_buffer, 0, sizeof(ps3_report_buffer));
         host_get_report(PS3_GET_PAIRING_INFO, ps3_report_buffer, report_len);
     } else {
         // Initialization complete, send output report to set LEDs
         isPS3Initialized = true;
         
-        // Create output report with LED for player 1
-        uint8_t ps3_out_report[48] = {
-            0x01, 0xff, 0x00, 0xff, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00,
-            0xff, 0x27, 0x10, 0x00, 0x32,  // LED 1 settings
-            0xff, 0x27, 0x10, 0x00, 0x32,  // LED 2 settings
-            0xff, 0x27, 0x10, 0x00, 0x32,  // LED 3 settings
-            0xff, 0x27, 0x10, 0x00, 0x32,  // LED 4 settings
-            0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00
-        };
+        // Create output report based on default template
+        uint8_t ps3_out_report[PS3_OUT_REPORT_SIZE];
+        memcpy(ps3_out_report, PS3_DEFAULT_OUT_REPORT, PS3_OUT_REPORT_SIZE);
         
-        // Set LED bitmap for player 1 (bit 1)
+        // Set LED bitmap for player 1 (bit 1 = 0x02)
         ps3_out_report[9] = 0x02;
         
-        // Send the output report
-        host_set_report(0x01, ps3_out_report, sizeof(ps3_out_report));
+        // Send the output report to configure LEDs
+        host_set_report(0x01, ps3_out_report, PS3_OUT_REPORT_SIZE);
     }
 }
 

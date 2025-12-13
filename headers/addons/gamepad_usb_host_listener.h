@@ -11,6 +11,13 @@
 #define GAMEPAD_HOST_DEBUG false
 #define GAMEPAD_HOST_USE_FEATURES true
 
+// PS3 controller initialization constants
+#define PS3_INIT_STAGE_COUNT 3
+#define PS3_INIT_REPORT_LEN_STAGE1 17
+#define PS3_INIT_REPORT_LEN_STAGE2 17
+#define PS3_INIT_REPORT_LEN_STAGE3 8
+#define PS3_OUT_REPORT_SIZE 48
+
 // Google Stadia controller report struct
 typedef struct TU_ATTR_PACKED
 {
