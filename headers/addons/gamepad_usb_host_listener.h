@@ -18,6 +18,10 @@
 #define PS3_INIT_REPORT_LEN_STAGE3 8
 #define PS3_OUT_REPORT_SIZE 48
 
+// Switch Pro controller constants
+#define SWITCH_PRO_VENDOR_ID 0x057E
+#define SWITCH_PRO_PRODUCT_ID 0x2009
+
 // Google Stadia controller report struct
 typedef struct TU_ATTR_PACKED
 {
@@ -117,6 +121,28 @@ typedef struct __attribute__((packed)) {
     uint8_t miscData[54];
 } DSReport;
 
+// Switch Pro controller report struct
+typedef struct __attribute__((packed)) {
+    uint8_t reportId;
+    uint8_t timer;
+    uint8_t connectionInfo : 4;
+    uint8_t batteryLevel : 4;
+    uint8_t buttons[3];      // buttons[0]: Y,X,B,A,SR,SL,R,ZR
+                             // buttons[1]: Minus,Plus,R3,L3,Home,Capture,dummy,charging
+                             // buttons[2]: Down,Up,Right,Left,SL,SR,L,ZL
+    uint8_t joysticks[6];    // 12-bit values packed: LX(12),LY(12),RX(12),RY(12)
+    uint8_t vibrator;
+} SwitchProInReport;
+
+typedef struct __attribute__((packed)) {
+    uint8_t command;
+    uint8_t sequenceCounter;
+    uint8_t rumbleL[4];
+    uint8_t rumbleR[4];
+    uint8_t subCommand;
+    uint8_t subCommandArgs[3];
+} SwitchProOutReport;
+
 // Add other controller structs here
 class GamepadUSBHostListener : public USBListener {
     public:// USB Listener Features
@@ -162,6 +188,21 @@ class GamepadUSBHostListener : public USBListener {
         bool isPS3Initialized = false;
         uint8_t ps3InitStage = 0;
         uint8_t ps3_report_buffer[PS3_OUT_REPORT_SIZE];
+
+        void process_switchpro(uint8_t const* report, uint16_t len);
+        void init_switchpro();
+        bool host_send_report(uint8_t report_id, void* report, uint16_t len);
+        enum class SwitchProInitState : uint8_t {
+            HANDSHAKE,
+            TIMEOUT,
+            LED,
+            LED_HOME,
+            FULL_REPORT,
+            IMU,
+            DONE
+        };
+        SwitchProInitState switchProInitState = SwitchProInitState::HANDSHAKE;
+        uint8_t switchProSequenceCounter = 0;
 
         void process_stadia(uint8_t const* report, uint16_t len);
 

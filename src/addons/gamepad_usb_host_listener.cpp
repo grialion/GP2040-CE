@@ -83,6 +83,11 @@ void GamepadUSBHostListener::mount(uint8_t dev_addr, uint8_t instance, uint8_t c
             init_ps3();
             break;
 
+        /* Switch Pro */
+        case SWITCH_PRO_PRODUCT_ID: // Nintendo Switch Pro controller
+            init_switchpro();
+            break;
+
         case 0xC294:               // Driving Force or similar
             isDFInit = false;
             setup_df_wheel();
@@ -111,6 +116,8 @@ void GamepadUSBHostListener::unmount(uint8_t dev_addr) {
     hasDS4DefReport = false;
     isPS3Initialized = false;
     ps3InitStage = 0;
+    switchProInitState = SwitchProInitState::HANDSHAKE;
+    switchProSequenceCounter = 0;
 }
 
 void GamepadUSBHostListener::report_received(uint8_t dev_addr, uint8_t instance, uint8_t const* report, uint16_t len) {
@@ -157,6 +164,9 @@ void GamepadUSBHostListener::process_ctrlr_report(uint8_t dev_addr, uint8_t cons
                 process_ps3(report, len);
             }
             break;
+        case SWITCH_PRO_PRODUCT_ID: // Nintendo Switch Pro controller
+            process_switchpro(report, len);
+            break;
         case 0x9400:               // Google Stadia controller
             process_stadia(report, len);
             break;
@@ -186,6 +196,10 @@ bool GamepadUSBHostListener::host_get_report(uint8_t report_id, void* report, ui
 bool GamepadUSBHostListener::host_set_report(uint8_t report_id, void* report, uint16_t len) {
     awaiting_cb = true;
     return tuh_hid_set_report(_controller_dev_addr, _controller_instance, report_id, HID_REPORT_TYPE_FEATURE, report, len);
+}
+
+bool GamepadUSBHostListener::host_send_report(uint8_t report_id, void* report, uint16_t len) {
+    return tuh_hid_send_report(_controller_dev_addr, _controller_instance, report_id, report, len);
 }
 
 void GamepadUSBHostListener::set_report_complete(uint8_t dev_addr, uint8_t instance, uint8_t report_id, uint8_t report_type, uint16_t len) {
@@ -539,6 +553,176 @@ void GamepadUSBHostListener::process_stadia(uint8_t const* report, uint16_t len)
     if (controller_report.GD_GamePadHatSwitch == 5) _controller_host_state.dpad |= GAMEPAD_MASK_DOWN | GAMEPAD_MASK_LEFT;
     if (controller_report.GD_GamePadHatSwitch == 6) _controller_host_state.dpad |= GAMEPAD_MASK_LEFT;
     if (controller_report.GD_GamePadHatSwitch == 7) _controller_host_state.dpad |= GAMEPAD_MASK_LEFT | GAMEPAD_MASK_UP;
+}
+
+void GamepadUSBHostListener::init_switchpro() {
+    switchProInitState = SwitchProInitState::HANDSHAKE;
+    switchProSequenceCounter = 0;
+    
+    // Start Switch Pro initialization with handshake
+    SwitchProOutReport out_report;
+    memset(&out_report, 0, sizeof(out_report));
+    
+    out_report.command = 0x80;  // HID command
+    out_report.sequenceCounter = 0x02;  // HANDSHAKE
+    
+    host_send_report(0, &out_report, 2);
+    switchProInitState = SwitchProInitState::TIMEOUT;
+}
+
+void GamepadUSBHostListener::process_switchpro(uint8_t const* report, uint16_t len) {
+    // If not initialized, continue initialization
+    if (switchProInitState != SwitchProInitState::DONE) {
+        SwitchProOutReport out_report;
+        memset(&out_report, 0, sizeof(out_report));
+        
+        // Set default rumble values
+        out_report.rumbleL[0] = 0x00;
+        out_report.rumbleL[1] = 0x01;
+        out_report.rumbleL[2] = 0x40;
+        out_report.rumbleL[3] = 0x40;
+        out_report.rumbleR[0] = 0x00;
+        out_report.rumbleR[1] = 0x01;
+        out_report.rumbleR[2] = 0x40;
+        out_report.rumbleR[3] = 0x40;
+        
+        uint8_t report_size = 10;
+        
+        switch (switchProInitState) {
+            case SwitchProInitState::TIMEOUT:
+                report_size = 2;
+                out_report.command = 0x80;  // HID
+                out_report.sequenceCounter = 0x04;  // DISABLE_TIMEOUT
+                if (host_send_report(0, &out_report, report_size)) {
+                    switchProInitState = SwitchProInitState::LED;
+                }
+                return;
+                
+            case SwitchProInitState::LED:
+                report_size = 12;
+                out_report.command = 0x01;  // AND_RUMBLE
+                out_report.sequenceCounter = (switchProSequenceCounter++) & 0x0F;
+                out_report.subCommand = 0x30;  // SET_PLAYER_LIGHTS
+                out_report.subCommandArgs[0] = 0x01;  // Player 1 LED
+                if (host_send_report(0, &out_report, report_size)) {
+                    switchProInitState = SwitchProInitState::LED_HOME;
+                }
+                return;
+                
+            case SwitchProInitState::LED_HOME:
+                report_size = 14;
+                out_report.command = 0x01;  // AND_RUMBLE
+                out_report.sequenceCounter = (switchProSequenceCounter++) & 0x0F;
+                out_report.subCommand = 0x38;  // SET_HOME_LIGHT
+                out_report.subCommandArgs[0] = (0 << 4) | 0xF;  // cycles and enable
+                out_report.subCommandArgs[1] = (0xF << 4) | 0x0;  // intensity
+                out_report.subCommandArgs[2] = (0xF << 4) | 0x0;  // mini cycle
+                if (host_send_report(0, &out_report, report_size)) {
+                    switchProInitState = SwitchProInitState::FULL_REPORT;
+                }
+                return;
+                
+            case SwitchProInitState::FULL_REPORT:
+                report_size = 12;
+                out_report.command = 0x01;  // AND_RUMBLE
+                out_report.sequenceCounter = (switchProSequenceCounter++) & 0x0F;
+                out_report.subCommand = 0x03;  // SET_MODE
+                out_report.subCommandArgs[0] = 0x30;  // FULL_REPORT_MODE
+                if (host_send_report(0, &out_report, report_size)) {
+                    switchProInitState = SwitchProInitState::IMU;
+                }
+                return;
+                
+            case SwitchProInitState::IMU:
+                report_size = 12;
+                out_report.command = 0x01;  // AND_RUMBLE
+                out_report.sequenceCounter = (switchProSequenceCounter++) & 0x0F;
+                out_report.subCommand = 0x40;  // TOGGLE_IMU
+                out_report.subCommandArgs[0] = 0x01;  // Enable
+                if (host_send_report(0, &out_report, report_size)) {
+                    switchProInitState = SwitchProInitState::DONE;
+                    tuh_hid_receive_report(_controller_dev_addr, _controller_instance);
+                }
+                return;
+                
+            default:
+                return;
+        }
+    }
+    
+    // Process input report
+    const SwitchProInReport* controller_report = reinterpret_cast<const SwitchProInReport*>(report);
+    static SwitchProInReport prev_report = { 0 };
+    
+    // Only process if report has changed (check button bytes)
+    if (memcmp(prev_report.buttons, controller_report->buttons, 3) == 0) {
+        tuh_hid_receive_report(_controller_dev_addr, _controller_instance);
+        return;
+    }
+    
+    // Extract 12-bit joystick values
+    uint16_t joy_lx = controller_report->joysticks[0] | ((controller_report->joysticks[1] & 0xF) << 8);
+    uint16_t joy_ly = (controller_report->joysticks[1] >> 4) | (controller_report->joysticks[2] << 4);
+    uint16_t joy_rx = controller_report->joysticks[3] | ((controller_report->joysticks[4] & 0xF) << 8);
+    uint16_t joy_ry = (controller_report->joysticks[4] >> 4) | (controller_report->joysticks[5] << 4);
+    
+    // Normalize from 12-bit (0-4095, center ~2047) to gamepad range
+    // Apply multiplier to compensate for limited range
+    int16_t norm_lx = ((int32_t)(joy_lx - 2047) * 22);
+    int16_t norm_ly = ((int32_t)(joy_ly - 2047) * 22);
+    int16_t norm_rx = ((int32_t)(joy_rx - 2047) * 22);
+    int16_t norm_ry = ((int32_t)(joy_ry - 2047) * 22);
+    
+    // Clamp to int16_t range
+    if (norm_lx < -32768) norm_lx = -32768;
+    if (norm_lx > 32767) norm_lx = 32767;
+    if (norm_ly < -32768) norm_ly = -32768;
+    if (norm_ly > 32767) norm_ly = 32767;
+    if (norm_rx < -32768) norm_rx = -32768;
+    if (norm_rx > 32767) norm_rx = 32767;
+    if (norm_ry < -32768) norm_ry = -32768;
+    if (norm_ry > 32767) norm_ry = 32767;
+    
+    // Map to gamepad range
+    _controller_host_state.lx = map(norm_lx + 32768, 0, 65535, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+    _controller_host_state.ly = map(norm_ly + 32768, 0, 65535, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+    _controller_host_state.rx = map(norm_rx + 32768, 0, 65535, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+    _controller_host_state.ry = map(norm_ry + 32768, 0, 65535, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+    
+    // Map buttons (buttons[0]: Y,X,B,A,SR,SL,R,ZR)
+    _controller_host_state.buttons = 0;
+    if (controller_report->buttons[0] & 0x01) _controller_host_state.buttons |= GAMEPAD_MASK_B3;  // Y -> X
+    if (controller_report->buttons[0] & 0x02) _controller_host_state.buttons |= GAMEPAD_MASK_B4;  // X -> Y
+    if (controller_report->buttons[0] & 0x04) _controller_host_state.buttons |= GAMEPAD_MASK_B1;  // B -> A
+    if (controller_report->buttons[0] & 0x08) _controller_host_state.buttons |= GAMEPAD_MASK_B2;  // A -> B
+    if (controller_report->buttons[0] & 0x40) _controller_host_state.buttons |= GAMEPAD_MASK_R1;  // R
+    if (controller_report->buttons[0] & 0x80) _controller_host_state.buttons |= GAMEPAD_MASK_R2;  // ZR
+    
+    // buttons[1]: Minus,Plus,R3,L3,Home,Capture,dummy,charging
+    if (controller_report->buttons[1] & 0x01) _controller_host_state.buttons |= GAMEPAD_MASK_S1;  // Minus -> Select
+    if (controller_report->buttons[1] & 0x02) _controller_host_state.buttons |= GAMEPAD_MASK_S2;  // Plus -> Start
+    if (controller_report->buttons[1] & 0x04) _controller_host_state.buttons |= GAMEPAD_MASK_L3;  // L3
+    if (controller_report->buttons[1] & 0x08) _controller_host_state.buttons |= GAMEPAD_MASK_R3;  // R3
+    if (controller_report->buttons[1] & 0x10) _controller_host_state.buttons |= GAMEPAD_MASK_A1;  // Home
+    if (controller_report->buttons[1] & 0x20) _controller_host_state.buttons |= GAMEPAD_MASK_A2;  // Capture
+    
+    // buttons[2]: Down,Up,Right,Left,SL,SR,L,ZL
+    if (controller_report->buttons[2] & 0x40) _controller_host_state.buttons |= GAMEPAD_MASK_L1;  // L
+    if (controller_report->buttons[2] & 0x80) _controller_host_state.buttons |= GAMEPAD_MASK_L2;  // ZL
+    
+    // D-pad
+    _controller_host_state.dpad = 0;
+    if (controller_report->buttons[2] & 0x01) _controller_host_state.dpad |= GAMEPAD_MASK_DOWN;
+    if (controller_report->buttons[2] & 0x02) _controller_host_state.dpad |= GAMEPAD_MASK_UP;
+    if (controller_report->buttons[2] & 0x04) _controller_host_state.dpad |= GAMEPAD_MASK_RIGHT;
+    if (controller_report->buttons[2] & 0x08) _controller_host_state.dpad |= GAMEPAD_MASK_LEFT;
+    
+    // ZL/ZR are digital on Switch Pro (no analog triggers)
+    _controller_host_state.lt = (controller_report->buttons[2] & 0x80) ? 255 : 0;
+    _controller_host_state.rt = (controller_report->buttons[0] & 0x80) ? 255 : 0;
+    
+    tuh_hid_receive_report(_controller_dev_addr, _controller_instance);
+    memcpy(&prev_report, controller_report, sizeof(SwitchProInReport));
 }
 
 void GamepadUSBHostListener::setup_df_wheel() {
