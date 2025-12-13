@@ -21,6 +21,9 @@
 // Switch Pro controller constants
 #define SWITCH_PRO_VENDOR_ID 0x057E
 #define SWITCH_PRO_PRODUCT_ID 0x2009
+#define SWITCH_PRO_JOYSTICK_CENTER 2047
+#define SWITCH_PRO_JOYSTICK_MULTIPLIER 22  // Compensates for limited 12-bit range (~4095) to fill int16 range
+#define INT16_CENTER_OFFSET 32768  // Offset to convert signed int16 to unsigned range
 
 // Google Stadia controller report struct
 typedef struct TU_ATTR_PACKED
@@ -203,6 +206,11 @@ class GamepadUSBHostListener : public USBListener {
         };
         SwitchProInitState switchProInitState = SwitchProInitState::HANDSHAKE;
         uint8_t switchProSequenceCounter = 0;
+        inline int16_t clamp_to_int16(int32_t value) {
+            if (value < -32768) return -32768;
+            if (value > 32767) return 32767;
+            return static_cast<int16_t>(value);
+        }
 
         void process_stadia(uint8_t const* report, uint16_t len);
 

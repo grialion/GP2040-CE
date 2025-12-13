@@ -666,28 +666,18 @@ void GamepadUSBHostListener::process_switchpro(uint8_t const* report, uint16_t l
     uint16_t joy_rx = controller_report->joysticks[3] | ((controller_report->joysticks[4] & 0xF) << 8);
     uint16_t joy_ry = (controller_report->joysticks[4] >> 4) | (controller_report->joysticks[5] << 4);
     
-    // Normalize from 12-bit (0-4095, center ~2047) to gamepad range
-    // Apply multiplier to compensate for limited range
-    int16_t norm_lx = ((int32_t)(joy_lx - 2047) * 22);
-    int16_t norm_ly = ((int32_t)(joy_ly - 2047) * 22);
-    int16_t norm_rx = ((int32_t)(joy_rx - 2047) * 22);
-    int16_t norm_ry = ((int32_t)(joy_ry - 2047) * 22);
+    // Normalize from 12-bit (0-4095, center at SWITCH_PRO_JOYSTICK_CENTER) to int16 range
+    // Apply multiplier to compensate for limited 12-bit range not covering full int16 range
+    int16_t norm_lx = clamp_to_int16((int32_t)(joy_lx - SWITCH_PRO_JOYSTICK_CENTER) * SWITCH_PRO_JOYSTICK_MULTIPLIER);
+    int16_t norm_ly = clamp_to_int16((int32_t)(joy_ly - SWITCH_PRO_JOYSTICK_CENTER) * SWITCH_PRO_JOYSTICK_MULTIPLIER);
+    int16_t norm_rx = clamp_to_int16((int32_t)(joy_rx - SWITCH_PRO_JOYSTICK_CENTER) * SWITCH_PRO_JOYSTICK_MULTIPLIER);
+    int16_t norm_ry = clamp_to_int16((int32_t)(joy_ry - SWITCH_PRO_JOYSTICK_CENTER) * SWITCH_PRO_JOYSTICK_MULTIPLIER);
     
-    // Clamp to int16_t range
-    if (norm_lx < -32768) norm_lx = -32768;
-    if (norm_lx > 32767) norm_lx = 32767;
-    if (norm_ly < -32768) norm_ly = -32768;
-    if (norm_ly > 32767) norm_ly = 32767;
-    if (norm_rx < -32768) norm_rx = -32768;
-    if (norm_rx > 32767) norm_rx = 32767;
-    if (norm_ry < -32768) norm_ry = -32768;
-    if (norm_ry > 32767) norm_ry = 32767;
-    
-    // Map to gamepad range
-    _controller_host_state.lx = map(norm_lx + 32768, 0, 65535, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
-    _controller_host_state.ly = map(norm_ly + 32768, 0, 65535, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
-    _controller_host_state.rx = map(norm_rx + 32768, 0, 65535, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
-    _controller_host_state.ry = map(norm_ry + 32768, 0, 65535, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+    // Convert signed int16 to unsigned range and map to gamepad range
+    _controller_host_state.lx = map(norm_lx + INT16_CENTER_OFFSET, 0, 65535, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+    _controller_host_state.ly = map(norm_ly + INT16_CENTER_OFFSET, 0, 65535, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+    _controller_host_state.rx = map(norm_rx + INT16_CENTER_OFFSET, 0, 65535, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+    _controller_host_state.ry = map(norm_ry + INT16_CENTER_OFFSET, 0, 65535, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
     
     // Map buttons (buttons[0]: Y,X,B,A,SR,SL,R,ZR)
     _controller_host_state.buttons = 0;
