@@ -101,7 +101,7 @@ jobs:
       - name: arm-none-eabi-gcc GNU Arm Embedded Toolchain
         uses: carlosperate/arm-none-eabi-gcc-action@v1
 
-      - name: Checkout pico-sdk/2.2.0
+      - name: Checkout pico-sdk/2.1.1
         uses: actions/checkout@v4.1.1
         with:
           repository: raspberrypi/pico-sdk
