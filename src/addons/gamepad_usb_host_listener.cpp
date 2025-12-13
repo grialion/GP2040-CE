@@ -65,6 +65,7 @@ void GamepadUSBHostListener::mount(uint8_t dev_addr, uint8_t instance, uint8_t c
 
         /* PS3 */
         case PS3_PRODUCT_ID:       // Sony DualShock 3 controller
+            init_ps3();
             break;
 
         case 0xC294:               // Driving Force or similar
@@ -93,6 +94,8 @@ void GamepadUSBHostListener::unmount(uint8_t dev_addr) {
     _controller_instance = 0;
     isDS4Identified = false;
     hasDS4DefReport = false;
+    isPS3Initialized = false;
+    ps3InitStage = 0;
 }
 
 void GamepadUSBHostListener::report_received(uint8_t dev_addr, uint8_t instance, uint8_t const* report, uint16_t len) {
@@ -135,7 +138,9 @@ void GamepadUSBHostListener::process_ctrlr_report(uint8_t dev_addr, uint8_t cons
             process_ds(report, len);
             break;
         case PS3_PRODUCT_ID:       // Sony DualShock 3 controller
-            process_ps3(report, len);
+            if (isPS3Initialized) {
+                process_ps3(report, len);
+            }
             break;
         case 0x9400:               // Google Stadia controller
             process_stadia(report, len);
@@ -185,7 +190,12 @@ void GamepadUSBHostListener::get_report_complete(uint8_t dev_addr, uint8_t insta
                 break;
         }
     }
-    //
+    
+    // Handle PS3 initialization stages
+    if (!isPS3Initialized && report_id == PS3_GET_PAIRING_INFO) {
+        setup_ps3();
+    }
+    
     awaiting_cb = false;
 }
 
@@ -443,6 +453,49 @@ void GamepadUSBHostListener::process_ps3(uint8_t const* report, uint16_t len) {
     }
 
     prev_report = controller_report;
+}
+
+void GamepadUSBHostListener::init_ps3() {
+    isPS3Initialized = false;
+    ps3InitStage = 0;
+    
+    // Start PS3 initialization sequence by requesting pairing info (0xF2)
+    memset(ps3_report_buffer, 0, sizeof(ps3_report_buffer));
+    host_get_report(PS3_GET_PAIRING_INFO, ps3_report_buffer, 17);
+}
+
+void GamepadUSBHostListener::setup_ps3() {
+    ps3InitStage++;
+    
+    if (ps3InitStage < 3) {
+        // Perform multiple GET_REPORT requests as part of initialization handshake
+        uint16_t report_len = (ps3InitStage == 2) ? 8 : 17;
+        memset(ps3_report_buffer, 0, sizeof(ps3_report_buffer));
+        host_get_report(PS3_GET_PAIRING_INFO, ps3_report_buffer, report_len);
+    } else {
+        // Initialization complete, send output report to set LEDs
+        isPS3Initialized = true;
+        
+        // Create output report with LED for player 1
+        uint8_t ps3_out_report[48] = {
+            0x01, 0xff, 0x00, 0xff, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00,
+            0xff, 0x27, 0x10, 0x00, 0x32,  // LED 1 settings
+            0xff, 0x27, 0x10, 0x00, 0x32,  // LED 2 settings
+            0xff, 0x27, 0x10, 0x00, 0x32,  // LED 3 settings
+            0xff, 0x27, 0x10, 0x00, 0x32,  // LED 4 settings
+            0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00
+        };
+        
+        // Set LED bitmap for player 1 (bit 1)
+        ps3_out_report[9] = 0x02;
+        
+        // Send the output report
+        host_set_report(0x01, ps3_out_report, sizeof(ps3_out_report));
+    }
 }
 
 void GamepadUSBHostListener::process_stadia(uint8_t const* report, uint16_t len) {
