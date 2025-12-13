@@ -206,8 +206,8 @@ void GamepadUSBHostListener::get_report_complete(uint8_t dev_addr, uint8_t insta
         }
     }
     
-    // Handle PS3 initialization stages
-    if (!isPS3Initialized && report_id == PS3_GET_PAIRING_INFO) {
+    // Handle PS3 initialization stages - only for PS3 controllers
+    if (!isPS3Initialized && controller_pid == PS3_PRODUCT_ID && report_id == PS3_GET_PAIRING_INFO) {
         setup_ps3();
     }
     

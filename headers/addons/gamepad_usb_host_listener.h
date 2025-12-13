@@ -161,7 +161,7 @@ class GamepadUSBHostListener : public USBListener {
         void init_ps3();
         bool isPS3Initialized = false;
         uint8_t ps3InitStage = 0;
-        uint8_t ps3_report_buffer[48];
+        uint8_t ps3_report_buffer[PS3_OUT_REPORT_SIZE];
 
         void process_stadia(uint8_t const* report, uint16_t len);
 
