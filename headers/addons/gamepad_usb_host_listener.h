@@ -149,6 +149,8 @@ class GamepadUSBHostListener : public USBListener {
 
         void process_ds(uint8_t const* report, uint16_t len);
 
+        void process_ps3(uint8_t const* report, uint16_t len);
+
         void process_stadia(uint8_t const* report, uint16_t len);
 
         void process_ultrastik360(uint8_t const* report, uint16_t len);

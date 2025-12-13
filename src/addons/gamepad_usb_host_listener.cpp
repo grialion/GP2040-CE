@@ -63,6 +63,10 @@ void GamepadUSBHostListener::mount(uint8_t dev_addr, uint8_t instance, uint8_t c
         case 0x0CE6:               // DualSense
             break;
 
+        /* PS3 */
+        case PS3_PRODUCT_ID:       // Sony DualShock 3 controller
+            break;
+
         case 0xC294:               // Driving Force or similar
             isDFInit = false;
             setup_df_wheel();
@@ -129,6 +133,9 @@ void GamepadUSBHostListener::process_ctrlr_report(uint8_t dev_addr, uint8_t cons
             break;
         case 0x0CE6:               // DualSense
             process_ds(report, len);
+            break;
+        case PS3_PRODUCT_ID:       // Sony DualShock 3 controller
+            process_ps3(report, len);
             break;
         case 0x9400:               // Google Stadia controller
             process_stadia(report, len);
@@ -384,6 +391,58 @@ void GamepadUSBHostListener::process_ds(uint8_t const* report, uint16_t len) {
     }
 
     prev_ds_report = controller_report;
+}
+
+void GamepadUSBHostListener::process_ps3(uint8_t const* report, uint16_t len) {
+    PS3Report controller_report;
+
+    // previous report used to compare for changes
+    static PS3Report prev_report = { 0 };
+
+    uint8_t const report_id = report[0];
+
+    if (report_id == 1) {
+        memcpy(&controller_report, report, sizeof(controller_report));
+
+        // Only process if report has changed
+        if (memcmp(&prev_report, &controller_report, sizeof(PS3Report)) != 0) {
+            // Map analog sticks (PS3 uses 0x00-0xFF range with 0x80 as center)
+            _controller_host_state.lx = map(controller_report.leftStickX, 0, 255, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+            _controller_host_state.ly = map(controller_report.leftStickY, 0, 255, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+            _controller_host_state.rx = map(controller_report.rightStickX, 0, 255, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+            _controller_host_state.ry = map(controller_report.rightStickY, 0, 255, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+            
+            // PS3 has analog triggers (0x00 = unpressed, 0xFF = fully pressed)
+            _controller_host_state.lt = controller_report.buttonL2Analog;
+            _controller_host_state.rt = controller_report.buttonR2Analog;
+
+            // Map buttons
+            _controller_host_state.buttons = 0;
+            if (controller_report.buttonTP) _controller_host_state.buttons |= GAMEPAD_MASK_A2;
+            if (controller_report.buttonSelect) _controller_host_state.buttons |= GAMEPAD_MASK_S1;
+            if (controller_report.buttonR3) _controller_host_state.buttons |= GAMEPAD_MASK_R3;
+            if (controller_report.buttonL3) _controller_host_state.buttons |= GAMEPAD_MASK_L3;
+            if (controller_report.buttonPS) _controller_host_state.buttons |= GAMEPAD_MASK_A1;
+            if (controller_report.buttonStart) _controller_host_state.buttons |= GAMEPAD_MASK_S2;
+            if (controller_report.buttonR1) _controller_host_state.buttons |= GAMEPAD_MASK_R1;
+            if (controller_report.buttonL1) _controller_host_state.buttons |= GAMEPAD_MASK_L1;
+            if (controller_report.buttonNorth) _controller_host_state.buttons |= GAMEPAD_MASK_B4;
+            if (controller_report.buttonEast) _controller_host_state.buttons |= GAMEPAD_MASK_B2;
+            if (controller_report.buttonSouth) _controller_host_state.buttons |= GAMEPAD_MASK_B1;
+            if (controller_report.buttonWest) _controller_host_state.buttons |= GAMEPAD_MASK_B3;
+            if (controller_report.buttonR2) _controller_host_state.buttons |= GAMEPAD_MASK_R2;
+            if (controller_report.buttonL2) _controller_host_state.buttons |= GAMEPAD_MASK_L2;
+
+            // Map D-pad (PS3 uses individual bits, not a HAT value)
+            _controller_host_state.dpad = 0;
+            if (controller_report.dpadUp) _controller_host_state.dpad |= GAMEPAD_MASK_UP;
+            if (controller_report.dpadDown) _controller_host_state.dpad |= GAMEPAD_MASK_DOWN;
+            if (controller_report.dpadLeft) _controller_host_state.dpad |= GAMEPAD_MASK_LEFT;
+            if (controller_report.dpadRight) _controller_host_state.dpad |= GAMEPAD_MASK_RIGHT;
+        }
+    }
+
+    prev_report = controller_report;
 }
 
 void GamepadUSBHostListener::process_stadia(uint8_t const* report, uint16_t len) {
