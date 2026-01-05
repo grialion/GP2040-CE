@@ -4,6 +4,21 @@
 #include "class/hid/hid.h"
 #include "class/hid/hid_host.h"
 
+// PS3 default output report for LED configuration
+// Based on PS3 controller specification, this sets up the controller with default LED/rumble settings
+static const uint8_t PS3_DEFAULT_OUT_REPORT[PS3_OUT_REPORT_SIZE] = {
+    0x01, 0xff, 0x00, 0xff, 0x00,  // Report ID and rumble settings
+    0x00, 0x00, 0x00, 0x00, 0x00,  // Rumble duration and LED bitmap (to be modified)
+    0xff, 0x27, 0x10, 0x00, 0x32,  // LED 1: duration 0xff, period 0x27, on-time 0x10, off-time 0x00, brightness 0x32
+    0xff, 0x27, 0x10, 0x00, 0x32,  // LED 2: same settings
+    0xff, 0x27, 0x10, 0x00, 0x32,  // LED 3: same settings
+    0xff, 0x27, 0x10, 0x00, 0x32,  // LED 4: same settings
+    0x00, 0x00, 0x00, 0x00, 0x00,  // Reserved
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00
+};
+
 void GamepadUSBHostListener::setup() {
     _controller_host_enabled = false;
 #if GAMEPAD_HOST_DEBUG
@@ -63,6 +78,16 @@ void GamepadUSBHostListener::mount(uint8_t dev_addr, uint8_t instance, uint8_t c
         case 0x0CE6:               // DualSense
             break;
 
+        /* PS3 */
+        case PS3_PRODUCT_ID:       // Sony DualShock 3 controller
+            init_ps3();
+            break;
+
+        /* Switch Pro */
+        case SWITCH_PRO_PRODUCT_ID: // Nintendo Switch Pro controller
+            init_switchpro();
+            break;
+
         case 0xC294:               // Driving Force or similar
             isDFInit = false;
             setup_df_wheel();
@@ -89,6 +114,10 @@ void GamepadUSBHostListener::unmount(uint8_t dev_addr) {
     _controller_instance = 0;
     isDS4Identified = false;
     hasDS4DefReport = false;
+    isPS3Initialized = false;
+    ps3InitStage = 0;
+    switchProInitState = SwitchProInitState::HANDSHAKE;
+    switchProSequenceCounter = 0;
 }
 
 void GamepadUSBHostListener::report_received(uint8_t dev_addr, uint8_t instance, uint8_t const* report, uint16_t len) {
@@ -130,6 +159,14 @@ void GamepadUSBHostListener::process_ctrlr_report(uint8_t dev_addr, uint8_t cons
         case 0x0CE6:               // DualSense
             process_ds(report, len);
             break;
+        case PS3_PRODUCT_ID:       // Sony DualShock 3 controller
+            if (isPS3Initialized) {
+                process_ps3(report, len);
+            }
+            break;
+        case SWITCH_PRO_PRODUCT_ID: // Nintendo Switch Pro controller
+            process_switchpro(report, len);
+            break;
         case 0x9400:               // Google Stadia controller
             process_stadia(report, len);
             break;
@@ -161,6 +198,10 @@ bool GamepadUSBHostListener::host_set_report(uint8_t report_id, void* report, ui
     return tuh_hid_set_report(_controller_dev_addr, _controller_instance, report_id, HID_REPORT_TYPE_FEATURE, report, len);
 }
 
+bool GamepadUSBHostListener::host_send_report(uint8_t report_id, void* report, uint16_t len) {
+    return tuh_hid_send_report(_controller_dev_addr, _controller_instance, report_id, report, len);
+}
+
 void GamepadUSBHostListener::set_report_complete(uint8_t dev_addr, uint8_t instance, uint8_t report_id, uint8_t report_type, uint16_t len) {
     awaiting_cb = false;
 }
@@ -178,7 +219,12 @@ void GamepadUSBHostListener::get_report_complete(uint8_t dev_addr, uint8_t insta
                 break;
         }
     }
-    //
+    
+    // Handle PS3 initialization stages - only for PS3 controllers
+    if (!isPS3Initialized && controller_pid == PS3_PRODUCT_ID && report_id == PS3_GET_PAIRING_INFO) {
+        setup_ps3();
+    }
+    
     awaiting_cb = false;
 }
 
@@ -386,6 +432,91 @@ void GamepadUSBHostListener::process_ds(uint8_t const* report, uint16_t len) {
     prev_ds_report = controller_report;
 }
 
+void GamepadUSBHostListener::process_ps3(uint8_t const* report, uint16_t len) {
+    PS3Report controller_report;
+
+    // previous report used to compare for changes
+    static PS3Report prev_report = { 0 };
+
+    uint8_t const report_id = report[0];
+
+    if (report_id == 1) {
+        memcpy(&controller_report, report, sizeof(controller_report));
+
+        // Only process if report has changed
+        if (memcmp(&prev_report, &controller_report, sizeof(PS3Report)) != 0) {
+            // Map analog sticks (PS3 uses 0x00-0xFF range with 0x80 as center)
+            _controller_host_state.lx = map(controller_report.leftStickX, 0, 255, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+            _controller_host_state.ly = map(controller_report.leftStickY, 0, 255, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+            _controller_host_state.rx = map(controller_report.rightStickX, 0, 255, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+            _controller_host_state.ry = map(controller_report.rightStickY, 0, 255, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+            
+            // PS3 has analog triggers (0x00 = unpressed, 0xFF = fully pressed)
+            _controller_host_state.lt = controller_report.buttonL2Analog;
+            _controller_host_state.rt = controller_report.buttonR2Analog;
+
+            // Map buttons
+            _controller_host_state.buttons = 0;
+            if (controller_report.buttonTP) _controller_host_state.buttons |= GAMEPAD_MASK_A2;
+            if (controller_report.buttonSelect) _controller_host_state.buttons |= GAMEPAD_MASK_S1;
+            if (controller_report.buttonR3) _controller_host_state.buttons |= GAMEPAD_MASK_R3;
+            if (controller_report.buttonL3) _controller_host_state.buttons |= GAMEPAD_MASK_L3;
+            if (controller_report.buttonPS) _controller_host_state.buttons |= GAMEPAD_MASK_A1;
+            if (controller_report.buttonStart) _controller_host_state.buttons |= GAMEPAD_MASK_S2;
+            if (controller_report.buttonR1) _controller_host_state.buttons |= GAMEPAD_MASK_R1;
+            if (controller_report.buttonL1) _controller_host_state.buttons |= GAMEPAD_MASK_L1;
+            if (controller_report.buttonNorth) _controller_host_state.buttons |= GAMEPAD_MASK_B4;
+            if (controller_report.buttonEast) _controller_host_state.buttons |= GAMEPAD_MASK_B2;
+            if (controller_report.buttonSouth) _controller_host_state.buttons |= GAMEPAD_MASK_B1;
+            if (controller_report.buttonWest) _controller_host_state.buttons |= GAMEPAD_MASK_B3;
+            if (controller_report.buttonR2) _controller_host_state.buttons |= GAMEPAD_MASK_R2;
+            if (controller_report.buttonL2) _controller_host_state.buttons |= GAMEPAD_MASK_L2;
+
+            // Map D-pad (PS3 uses individual bits, not a HAT value)
+            _controller_host_state.dpad = 0;
+            if (controller_report.dpadUp) _controller_host_state.dpad |= GAMEPAD_MASK_UP;
+            if (controller_report.dpadDown) _controller_host_state.dpad |= GAMEPAD_MASK_DOWN;
+            if (controller_report.dpadLeft) _controller_host_state.dpad |= GAMEPAD_MASK_LEFT;
+            if (controller_report.dpadRight) _controller_host_state.dpad |= GAMEPAD_MASK_RIGHT;
+        }
+    }
+
+    prev_report = controller_report;
+}
+
+void GamepadUSBHostListener::init_ps3() {
+    isPS3Initialized = false;
+    ps3InitStage = 0;
+    
+    // Start PS3 initialization sequence by requesting pairing info (0xF2)
+    memset(ps3_report_buffer, 0, sizeof(ps3_report_buffer));
+    host_get_report(PS3_GET_PAIRING_INFO, ps3_report_buffer, PS3_INIT_REPORT_LEN_STAGE1);
+}
+
+void GamepadUSBHostListener::setup_ps3() {
+    ps3InitStage++;
+    
+    if (ps3InitStage < PS3_INIT_STAGE_COUNT) {
+        // Perform multiple GET_REPORT requests as part of initialization handshake
+        uint16_t report_len = (ps3InitStage == 2) ? PS3_INIT_REPORT_LEN_STAGE3 : PS3_INIT_REPORT_LEN_STAGE2;
+        memset(ps3_report_buffer, 0, sizeof(ps3_report_buffer));
+        host_get_report(PS3_GET_PAIRING_INFO, ps3_report_buffer, report_len);
+    } else {
+        // Initialization complete, send output report to set LEDs
+        isPS3Initialized = true;
+        
+        // Create output report based on default template
+        uint8_t ps3_out_report[PS3_OUT_REPORT_SIZE];
+        memcpy(ps3_out_report, PS3_DEFAULT_OUT_REPORT, PS3_OUT_REPORT_SIZE);
+        
+        // Set LED bitmap for player 1 (bit 1 = 0x02)
+        ps3_out_report[9] = 0x02;
+        
+        // Send the output report to configure LEDs
+        host_set_report(0x01, ps3_out_report, PS3_OUT_REPORT_SIZE);
+    }
+}
+
 void GamepadUSBHostListener::process_stadia(uint8_t const* report, uint16_t len) {
     google_stadia_report_t controller_report;
 
@@ -422,6 +553,166 @@ void GamepadUSBHostListener::process_stadia(uint8_t const* report, uint16_t len)
     if (controller_report.GD_GamePadHatSwitch == 5) _controller_host_state.dpad |= GAMEPAD_MASK_DOWN | GAMEPAD_MASK_LEFT;
     if (controller_report.GD_GamePadHatSwitch == 6) _controller_host_state.dpad |= GAMEPAD_MASK_LEFT;
     if (controller_report.GD_GamePadHatSwitch == 7) _controller_host_state.dpad |= GAMEPAD_MASK_LEFT | GAMEPAD_MASK_UP;
+}
+
+void GamepadUSBHostListener::init_switchpro() {
+    switchProInitState = SwitchProInitState::HANDSHAKE;
+    switchProSequenceCounter = 0;
+    
+    // Start Switch Pro initialization with handshake
+    SwitchProOutReport out_report;
+    memset(&out_report, 0, sizeof(out_report));
+    
+    out_report.command = 0x80;  // HID command
+    out_report.sequenceCounter = 0x02;  // HANDSHAKE
+    
+    host_send_report(0, &out_report, 2);
+    switchProInitState = SwitchProInitState::TIMEOUT;
+}
+
+void GamepadUSBHostListener::process_switchpro(uint8_t const* report, uint16_t len) {
+    // If not initialized, continue initialization
+    if (switchProInitState != SwitchProInitState::DONE) {
+        SwitchProOutReport out_report;
+        memset(&out_report, 0, sizeof(out_report));
+        
+        // Set default rumble values
+        out_report.rumbleL[0] = 0x00;
+        out_report.rumbleL[1] = 0x01;
+        out_report.rumbleL[2] = 0x40;
+        out_report.rumbleL[3] = 0x40;
+        out_report.rumbleR[0] = 0x00;
+        out_report.rumbleR[1] = 0x01;
+        out_report.rumbleR[2] = 0x40;
+        out_report.rumbleR[3] = 0x40;
+        
+        uint8_t report_size = 10;
+        
+        switch (switchProInitState) {
+            case SwitchProInitState::TIMEOUT:
+                report_size = 2;
+                out_report.command = 0x80;  // HID
+                out_report.sequenceCounter = 0x04;  // DISABLE_TIMEOUT
+                if (host_send_report(0, &out_report, report_size)) {
+                    switchProInitState = SwitchProInitState::LED;
+                }
+                return;
+                
+            case SwitchProInitState::LED:
+                report_size = 12;
+                out_report.command = 0x01;  // AND_RUMBLE
+                out_report.sequenceCounter = (switchProSequenceCounter++) & 0x0F;
+                out_report.subCommand = 0x30;  // SET_PLAYER_LIGHTS
+                out_report.subCommandArgs[0] = 0x01;  // Player 1 LED
+                if (host_send_report(0, &out_report, report_size)) {
+                    switchProInitState = SwitchProInitState::LED_HOME;
+                }
+                return;
+                
+            case SwitchProInitState::LED_HOME:
+                report_size = 14;
+                out_report.command = 0x01;  // AND_RUMBLE
+                out_report.sequenceCounter = (switchProSequenceCounter++) & 0x0F;
+                out_report.subCommand = 0x38;  // SET_HOME_LIGHT
+                out_report.subCommandArgs[0] = (0 << 4) | 0xF;  // cycles and enable
+                out_report.subCommandArgs[1] = (0xF << 4) | 0x0;  // intensity
+                out_report.subCommandArgs[2] = (0xF << 4) | 0x0;  // mini cycle
+                if (host_send_report(0, &out_report, report_size)) {
+                    switchProInitState = SwitchProInitState::FULL_REPORT;
+                }
+                return;
+                
+            case SwitchProInitState::FULL_REPORT:
+                report_size = 12;
+                out_report.command = 0x01;  // AND_RUMBLE
+                out_report.sequenceCounter = (switchProSequenceCounter++) & 0x0F;
+                out_report.subCommand = 0x03;  // SET_MODE
+                out_report.subCommandArgs[0] = 0x30;  // FULL_REPORT_MODE
+                if (host_send_report(0, &out_report, report_size)) {
+                    switchProInitState = SwitchProInitState::IMU;
+                }
+                return;
+                
+            case SwitchProInitState::IMU:
+                report_size = 12;
+                out_report.command = 0x01;  // AND_RUMBLE
+                out_report.sequenceCounter = (switchProSequenceCounter++) & 0x0F;
+                out_report.subCommand = 0x40;  // TOGGLE_IMU
+                out_report.subCommandArgs[0] = 0x01;  // Enable
+                if (host_send_report(0, &out_report, report_size)) {
+                    switchProInitState = SwitchProInitState::DONE;
+                    tuh_hid_receive_report(_controller_dev_addr, _controller_instance);
+                }
+                return;
+                
+            default:
+                return;
+        }
+    }
+    
+    // Process input report
+    const SwitchProInReport* controller_report = reinterpret_cast<const SwitchProInReport*>(report);
+    static SwitchProInReport prev_report = { 0 };
+    
+    // Only process if report has changed (check button bytes)
+    if (memcmp(prev_report.buttons, controller_report->buttons, 3) == 0) {
+        tuh_hid_receive_report(_controller_dev_addr, _controller_instance);
+        return;
+    }
+    
+    // Extract 12-bit joystick values
+    uint16_t joy_lx = controller_report->joysticks[0] | ((controller_report->joysticks[1] & 0xF) << 8);
+    uint16_t joy_ly = (controller_report->joysticks[1] >> 4) | (controller_report->joysticks[2] << 4);
+    uint16_t joy_rx = controller_report->joysticks[3] | ((controller_report->joysticks[4] & 0xF) << 8);
+    uint16_t joy_ry = (controller_report->joysticks[4] >> 4) | (controller_report->joysticks[5] << 4);
+    
+    // Normalize from 12-bit (0-4095, center at SWITCH_PRO_JOYSTICK_CENTER) to int16 range
+    // Apply multiplier to compensate for limited 12-bit range not covering full int16 range
+    int16_t norm_lx = clamp_to_int16((int32_t)(joy_lx - SWITCH_PRO_JOYSTICK_CENTER) * SWITCH_PRO_JOYSTICK_MULTIPLIER);
+    int16_t norm_ly = clamp_to_int16((int32_t)(joy_ly - SWITCH_PRO_JOYSTICK_CENTER) * SWITCH_PRO_JOYSTICK_MULTIPLIER);
+    int16_t norm_rx = clamp_to_int16((int32_t)(joy_rx - SWITCH_PRO_JOYSTICK_CENTER) * SWITCH_PRO_JOYSTICK_MULTIPLIER);
+    int16_t norm_ry = clamp_to_int16((int32_t)(joy_ry - SWITCH_PRO_JOYSTICK_CENTER) * SWITCH_PRO_JOYSTICK_MULTIPLIER);
+    
+    // Convert signed int16 to unsigned range and map to gamepad range
+    _controller_host_state.lx = map(norm_lx + INT16_CENTER_OFFSET, 0, 65535, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+    _controller_host_state.ly = map(norm_ly + INT16_CENTER_OFFSET, 0, 65535, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+    _controller_host_state.rx = map(norm_rx + INT16_CENTER_OFFSET, 0, 65535, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+    _controller_host_state.ry = map(norm_ry + INT16_CENTER_OFFSET, 0, 65535, GAMEPAD_JOYSTICK_MIN, GAMEPAD_JOYSTICK_MAX);
+    
+    // Map buttons (buttons[0]: Y,X,B,A,SR,SL,R,ZR)
+    _controller_host_state.buttons = 0;
+    if (controller_report->buttons[0] & 0x01) _controller_host_state.buttons |= GAMEPAD_MASK_B3;  // Y -> X
+    if (controller_report->buttons[0] & 0x02) _controller_host_state.buttons |= GAMEPAD_MASK_B4;  // X -> Y
+    if (controller_report->buttons[0] & 0x04) _controller_host_state.buttons |= GAMEPAD_MASK_B1;  // B -> A
+    if (controller_report->buttons[0] & 0x08) _controller_host_state.buttons |= GAMEPAD_MASK_B2;  // A -> B
+    if (controller_report->buttons[0] & 0x40) _controller_host_state.buttons |= GAMEPAD_MASK_R1;  // R
+    if (controller_report->buttons[0] & 0x80) _controller_host_state.buttons |= GAMEPAD_MASK_R2;  // ZR
+    
+    // buttons[1]: Minus,Plus,R3,L3,Home,Capture,dummy,charging
+    if (controller_report->buttons[1] & 0x01) _controller_host_state.buttons |= GAMEPAD_MASK_S1;  // Minus -> Select
+    if (controller_report->buttons[1] & 0x02) _controller_host_state.buttons |= GAMEPAD_MASK_S2;  // Plus -> Start
+    if (controller_report->buttons[1] & 0x04) _controller_host_state.buttons |= GAMEPAD_MASK_L3;  // L3
+    if (controller_report->buttons[1] & 0x08) _controller_host_state.buttons |= GAMEPAD_MASK_R3;  // R3
+    if (controller_report->buttons[1] & 0x10) _controller_host_state.buttons |= GAMEPAD_MASK_A1;  // Home
+    if (controller_report->buttons[1] & 0x20) _controller_host_state.buttons |= GAMEPAD_MASK_A2;  // Capture
+    
+    // buttons[2]: Down,Up,Right,Left,SL,SR,L,ZL
+    if (controller_report->buttons[2] & 0x40) _controller_host_state.buttons |= GAMEPAD_MASK_L1;  // L
+    if (controller_report->buttons[2] & 0x80) _controller_host_state.buttons |= GAMEPAD_MASK_L2;  // ZL
+    
+    // D-pad
+    _controller_host_state.dpad = 0;
+    if (controller_report->buttons[2] & 0x01) _controller_host_state.dpad |= GAMEPAD_MASK_DOWN;
+    if (controller_report->buttons[2] & 0x02) _controller_host_state.dpad |= GAMEPAD_MASK_UP;
+    if (controller_report->buttons[2] & 0x04) _controller_host_state.dpad |= GAMEPAD_MASK_RIGHT;
+    if (controller_report->buttons[2] & 0x08) _controller_host_state.dpad |= GAMEPAD_MASK_LEFT;
+    
+    // ZL/ZR are digital on Switch Pro (no analog triggers)
+    _controller_host_state.lt = (controller_report->buttons[2] & 0x80) ? 255 : 0;
+    _controller_host_state.rt = (controller_report->buttons[0] & 0x80) ? 255 : 0;
+    
+    tuh_hid_receive_report(_controller_dev_addr, _controller_instance);
+    memcpy(&prev_report, controller_report, sizeof(SwitchProInReport));
 }
 
 void GamepadUSBHostListener::setup_df_wheel() {

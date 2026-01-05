@@ -11,6 +11,20 @@
 #define GAMEPAD_HOST_DEBUG false
 #define GAMEPAD_HOST_USE_FEATURES true
 
+// PS3 controller initialization constants
+#define PS3_INIT_STAGE_COUNT 3
+#define PS3_INIT_REPORT_LEN_STAGE1 17
+#define PS3_INIT_REPORT_LEN_STAGE2 17
+#define PS3_INIT_REPORT_LEN_STAGE3 8
+#define PS3_OUT_REPORT_SIZE 48
+
+// Switch Pro controller constants
+#define SWITCH_PRO_VENDOR_ID 0x057E
+#define SWITCH_PRO_PRODUCT_ID 0x2009
+#define SWITCH_PRO_JOYSTICK_CENTER 2047
+#define SWITCH_PRO_JOYSTICK_MULTIPLIER 22  // Compensates for limited 12-bit range (~4095) to fill int16 range
+#define INT16_CENTER_OFFSET 32768  // Offset to convert signed int16 to unsigned range
+
 // Google Stadia controller report struct
 typedef struct TU_ATTR_PACKED
 {
@@ -110,6 +124,28 @@ typedef struct __attribute__((packed)) {
     uint8_t miscData[54];
 } DSReport;
 
+// Switch Pro controller report struct
+typedef struct __attribute__((packed)) {
+    uint8_t reportId;
+    uint8_t timer;
+    uint8_t connectionInfo : 4;
+    uint8_t batteryLevel : 4;
+    uint8_t buttons[3];      // buttons[0]: Y,X,B,A,SR,SL,R,ZR
+                             // buttons[1]: Minus,Plus,R3,L3,Home,Capture,dummy,charging
+                             // buttons[2]: Down,Up,Right,Left,SL,SR,L,ZL
+    uint8_t joysticks[6];    // 12-bit values packed: LX(12),LY(12),RX(12),RY(12)
+    uint8_t vibrator;
+} SwitchProInReport;
+
+typedef struct __attribute__((packed)) {
+    uint8_t command;
+    uint8_t sequenceCounter;
+    uint8_t rumbleL[4];
+    uint8_t rumbleR[4];
+    uint8_t subCommand;
+    uint8_t subCommandArgs[3];
+} SwitchProOutReport;
+
 // Add other controller structs here
 class GamepadUSBHostListener : public USBListener {
     public:// USB Listener Features
@@ -148,6 +184,33 @@ class GamepadUSBHostListener : public USBListener {
         uint8_t report_buffer[PS4_ENDPOINT_SIZE];
 
         void process_ds(uint8_t const* report, uint16_t len);
+
+        void process_ps3(uint8_t const* report, uint16_t len);
+        void setup_ps3();
+        void init_ps3();
+        bool isPS3Initialized = false;
+        uint8_t ps3InitStage = 0;
+        uint8_t ps3_report_buffer[PS3_OUT_REPORT_SIZE];
+
+        void process_switchpro(uint8_t const* report, uint16_t len);
+        void init_switchpro();
+        bool host_send_report(uint8_t report_id, void* report, uint16_t len);
+        enum class SwitchProInitState : uint8_t {
+            HANDSHAKE,
+            TIMEOUT,
+            LED,
+            LED_HOME,
+            FULL_REPORT,
+            IMU,
+            DONE
+        };
+        SwitchProInitState switchProInitState = SwitchProInitState::HANDSHAKE;
+        uint8_t switchProSequenceCounter = 0;
+        inline int16_t clamp_to_int16(int32_t value) {
+            if (value < -32768) return -32768;
+            if (value > 32767) return 32767;
+            return static_cast<int16_t>(value);
+        }
 
         void process_stadia(uint8_t const* report, uint16_t len);
 
